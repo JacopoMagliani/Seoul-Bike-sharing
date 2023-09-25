@@ -1,0 +1,913 @@
+---
+title: "Seoul Bike Sharing"
+author:
+    - Brocco Mattia, 2044714
+    - Magliani Jacopo, 2040912
+output:
+  html_document:
+    css: style.css
+    toc: true
+  pdf_document: default
+  df_print: paged
+---
+
+
+# 1. INTRODUCTION
+
+The study hereby presented concerns the topic of demand forecasting. More specifically, the subject of study concerns the industry of bike sharing for the city of Seoul (South Korea) during a time span of one year (between 2017 and 2018).
+The dataset is available at https://archive.ics.uci.edu/ml/index.php.
+
+This project aims at assessing to which extent it is possible to predict the demand for bikes given the data at hand in order to, ultimately, provide some additional insights on the shared public transport industry.
+
+For the sake of clearness, the target variable will be called "Rented.Bike.Count", and it is inherently a non-negative continuous variable.
+
+List of packages used
+
+* `car`
+* `leaps`
+* `Hmisc`
+* `glmnet`
+* `mosaic`
+* `ggplot2`
+* `corrplot`
+* `data.table`
+* `fastDummies`
+
+```{r, include = FALSE}
+library(car)
+library(leaps)
+library(Hmisc)
+library(glmnet)
+library(mosaic)
+library(ggplot2)
+library(corrplot)
+library(data.table)
+library(fastDummies)
+```
+
+
+The multivariate dataframe consists of 8760 observations and 14 variables.
+```{r, echo = FALSE}
+#We found some problems with the make.names(...) function. thus we removed the '°' symbol from temperature in the csv file.
+df <- read.csv("SeoulBikeData.csv", header = TRUE)
+
+names(df)[4] <- "Temperature.C."
+names(df)[5] <- "Humidity" 
+names(df)[6] <- "Wind.speed.m.s."
+names(df)[7] <- "Visibility.10m"
+names(df)[8] <- "Dew.point.temperature.C."
+names(df)[9] <- "Solar.Radiation.MJ.m2."
+names(df)[10] <- "Rainfall.mm."
+names(df)[11] <- "Snowfall.cm." 
+
+str(df)
+```
+
+Since for each day we have access to the data for each hour, this means we have 365 distinct days. To be specific, records start the first day of December of 2017 and finish the last day of November of 2018. 
+```{r, echo = FALSE}
+print(df[c(1,dim(df)[1]), "Date"], max.levels = 0)
+```
+
+# 2. EXPLORATORY DATA ANALYSIS
+
+In the first place we want to assess the "health" of the data.
+
+1) NA values
+```{r}
+# no empty values are present
+sum(any(is.na(df[,])))
+```
+2) Assessment on time windows and "functioning" flag.
+
+
+There are 18 holiday days in the dataset (New Years Eve, Buddha's birthday, Day of Independence and so on)
+```{r, echo = FALSE}
+print(c(unique(df[df[, "Holiday"] == "Holiday", ]["Date"])), max.levels = 0)
+```
+
+While it is useful to have separated data for each hour, we won't be able to understand whether the target variable is influenced by a specific holiday (e.g. New Year's Eve), given that we only have data for one year. However, what we will show is whether the fact that one day is holiday or not has an impact on the target variable.
+
+The feature `Functioning.day` indicates if there is data about the number of bikes rented. We can see that for 12 days there are no data for the entire day, while in 06/10/2018 there are data from 7 am onwards. These data gaps are likely due to malfunctions or maintenance activities.
+```{r, echo = FALSE}
+table(df$Functioning.Day)
+print(c(unique(df[df[, "Functioning.Day"] == "No", ]["Date"])), max.levels = 0)
+print(c(df[df$Date == "06/10/2018",][, c("Hour", "Functioning.Day")]), max.levels = 0)
+```
+
+Next, some tables are proposed in order to better understand how categorical regressors are distributed throughout the dataset. 
+```{r, echo = FALSE}
+par(mfrow = c(1, 3))
+barchart(df$Seasons, horizontal = F, col = "#BAF7C9",
+         main = "Seasons barchart")
+barchart(df$Holiday, horizontal = F, col = "#BAF7C9",
+         main = "Holiday (YES/NO) barchart")
+barchart(df$Functioning.Day, horizontal = F, col = "#BAF7C9",
+         main = "Functioning (YES/NO) day barchart")
+```
+
+## 2.1. Graphical Data exploration
+
+In the first place, regressors are taken into consideration for (graphical) exploratory analysis.
+
+
+Through a pivot table we can assess more clearly the behavior of the independent variables. This because for most of the weather conditions, the information recorded at each hour of the day may result messy at this point of the analysis.
+Therefore, the following object is meant to group variables on each date, based on a function (that can be either max or mean).
+```{r}
+# This data type conversion will ease graphical representations
+df$Date <- as.Date(df$Date, format = "%d/%m/%Y")
+
+# Create a new data frame to store aggregates of variables by date
+pivot.table <- aggregate(Rented.Bike.Count~Date, df, FUN = mean)
+
+pivot.table$Max.Day.Solar.Radiation <- aggregate(Solar.Radiation.MJ.m2. ~ Date,
+                                                df, FUN = max)$Solar.Radiation.MJ.m2.
+pivot.table$Max.Day.Wind.Speed <- aggregate(Wind.speed.m.s. ~ Date,
+                                                df, FUN = max)$Wind.speed.m.s.
+pivot.table$Max.Day.Rainfall <- aggregate(Rainfall.mm. ~ Date,
+                                                df, FUN = max)$Rainfall.mm.
+pivot.table$Max.Day.Snowfall <- aggregate(Snowfall.cm. ~ Date,
+                                                df, FUN = max)$Snowfall.cm.
+pivot.table$Avg.Day.Humidity <- aggregate(Humidity ~ Date,
+                                          df, FUN = mean)$Humidity
+pivot.table$Avg.Day.Visibility <- aggregate(Visibility.10m ~ Date,
+                                            df, FUN = mean)$Visibility.10m
+```
+
+We may see no unexpected behavior in the graphs, the atmospheric variables show trends not too far from what we expect from a continental climate throughout the different seasons (higher humidity in Summer, snowfall only in Winter and so on).
+
+```{r, echo = FALSE}
+##############################
+# Weather and time of the year
+##############################
+
+par(mfrow = c(3, 3))
+
+plot(df$Date, df$Temperature.C., xlab = "Date", type = "l",
+     ylab = "Temperature", main = "Temperature (°C) over the year")
+plot(df$Date, df$Dew.point.temperature.C., xlab = "Date", type = "l",
+     ylab = "Dew Point temp.", main = "Dew Point Temp. (°C) over the year")
+# data from pivot.table (solar radiation has MAX function)
+plot(pivot.table$Date, pivot.table$Max.Day.Solar.Radiation, xlab = "Date",
+     ylab = "Solar Radiation", main = "Daily max Solar radiation (MJ/m2)", type = "l")
+# data from pivot.table (humidity has AVG function)
+plot(pivot.table$Date, pivot.table$Avg.Day.Humidity, xlab = "Date", ylab = "Humidity",
+     main = "Avg daily Humidity (%) over the year", type = "l")
+# data from pivot.table (visibility has AVG function)
+plot(pivot.table$Date, pivot.table$Avg.Day.Visibility, xlab = "Date",
+     ylab = "Avg daily Visibility 10m", main = "Visibility (m) over the year", type = "l")
+# data from pivot.table (wind speed has MAX function)
+plot(pivot.table$Date, pivot.table$Max.Day.Wind.Speed, xlab = "Date",
+     ylab = "Wind speed", main = "Max daily Wind speed (m/s) over the year", type = "l")
+# data from pivot.table (rainfall has MAX function)
+plot(pivot.table$Date, pivot.table$Max.Day.Rainfall, xlab = "Date",
+     ylab = "Rainfall", main = "Max daily Rainfall (mm) over the year", type = "l")
+# data from pivot.table (snowfall has MAX function)
+plot(pivot.table$Date, pivot.table$Max.Day.Snowfall, xlab = "Date",
+     ylab = "Snowfall", main = "Max daily Snowfall (cm) over the year", type = "l")
+```
+
+Since most of the variables are related to the weather we may want to consider how these are distributed over each season.
+```{r}
+# Compare more than one regressor at a time
+par(mfrow = c(2, 2))
+
+densityplot(~Temperature.C., data = df, groups = Seasons,
+            auto.key = TRUE, ylab = "Density", main = "Tempereature by season")
+
+densityplot(~Humidity, data = df, groups = Seasons,
+            auto.key = TRUE, ylab = "Density", main = "Humidity by season")
+
+densityplot(~Rainfall.mm., data = df, groups = Seasons, xlim = c(-1, 5),
+            auto.key = TRUE, ylab = "Density", main = "Rainfall by season")
+
+densityplot(~Visibility.10m, data = df, groups = Seasons,
+            auto.key = TRUE, ylab = "Density", main = "Visibility by season")
+```
+
+Next, we are interested in the independent (or target) variable of the study. The following representations aim at assessing the behavior of the latter, as well as the extent of generic relationships between the target variable and the available regressors.
+
+From these plots we see how the target variable distribution is left-skewed and pretty far from a normal distribution (considering also the sample size).
+```{r, echo = FALSE}
+par(mfrow = c(1, 2))
+hist(df$Rented.Bike.Count, main = "Rented Bikes count", col = "#BAF7C9")
+boxplot(df$Rented.Bike.Count, main = "Rented Bikes count",
+        horizontal = T, col = "#BAF7C9")
+```
+
+```{r, echo = FALSE}
+#add feature to have the total bikes rented in each day
+plot(pivot.table$Date, pivot.table$Rented.Bike.Count,
+     main = "Bikes rented for each day", xlab = "Day", ylab = "Sum of Rented Bikes")
+```
+
+We can see the average number of bikes rented for day is low in Winter, increases in Spring, reaches the maximum in June, slightly decreases from June to August (probably some users go outside of the city during the summer break that goes from 22/06 to 31/08), increases again in September (end of the summer break) and then starts decreasing in October.
+
+```{r, echo = FALSE}
+# Convert "Seasons" as factor and set a precise ordering
+df$Seasons <- factor(df$Seasons, levels = c("Spring", "Summer", "Autumn", "Winter"))
+plot(df$Seasons, df$Rented.Bike.Count, main = "Bikes rented for season",
+     xlab = "Season", ylab = "Rented Bikes", col = "#BAF7C9")
+```
+
+We can see the average number of bikes rented in Winter is much less than the average number in the other seasons (because of the low temperatures). 
+Summer has the highest average, while Autumn has a higher average than Spring probably because it benefits from the hot climate still present for a few weeks at the end of the summer season.
+
+Non-Holiday days are characterized by an average of rented bikes greater than that of Holidays days. This is due to the small number of Holiday days in the year.
+
+```{r,echo = FALSE}
+df$Holiday <- as.factor(df$Holiday)
+plot(df$Holiday, df$Rented.Bike.Count, main = "Bikes rented for holiday",
+     xlab = "Holiday", ylab = "Rented Bikes", col = "#BAF7C9")
+```
+
+To analyze the number of bikes rented by period of the day We add a factor variable related to the hour time (it is Night from 0 am to 5 am, Morning from 6am to 11 am and so on). From the plot we can notice the number of bikes rented is on average high in the Evening and low at Night.
+
+```{r}
+df$Time <- ifelse(df$Hour >= 18, "Evening",
+                  ifelse(df$Hour >= 12, "Afternoon",
+                         ifelse(df$Hour >= 6, "Morning",
+                                ifelse(df$Hour >= 0, "Night"))))
+df$Time <- factor(df$Time, levels = c("Morning", "Afternoon", "Evening", "Night"))
+
+plot(df$Time, df$Rented.Bike.Count, main = "Bikes rented for Time",
+     xlab = "Time", ylab = "Rented Bikes", col = "#BAF7C9")
+```
+
+# 3. FEATURE ENGINEERING
+
+As shown above, `Functioning.day` states whether data for that specific time stamp (day, hour) is available or not. Therefore, we discard the examples that have "NO". We then drop the column because it becomes meaningless.
+```{r}
+XY <- df[df[,"Functioning.Day"] == "Yes", ]
+XY <- subset(XY, select = -c(Functioning.Day) )
+# We also drop the column date
+# drop also TIME, as proven not improve the model
+XY <- subset(XY, select = -c(Date, Time) )
+
+dim(XY)
+
+
+# Convert the factor "Holiday" into binary encoding
+XY$Holiday<-ifelse(XY$Holiday == "Holiday", 1, 0)
+XY$Holiday <- factor(XY$Holiday, levels = c(0, 1))
+```
+```{r}
+# Tranform the response variable in order to make it more similar to a normal distribution
+XY$Rented.Bike.Count <- log(XY$Rented.Bike.Count)
+hist(XY$Rented.Bike.Count, main = "Log of Rented Bikes count", col = "#BAF7C9")
+```
+
+```{r}
+head(XY)
+```
+
+# 4. ANALYSIS
+
+Before the setting up of regression models, we may get a deeper understanding of the mutual interactions between the variables at hand. This is useful to improve our knowledge on the problem, and to see whether data represents somewhat the common sense related to the favorable conditions for bike sharing.
+
+First we want to assess the extent of mutual relationships across numerical variables.
+
+**Covariance matrix**
+```{r}
+round(cov(XY[, 1:10]), 2)
+```
+
+**Correlation Matrix**
+
+The major highlight here is the very high correlation ($0.91$) between `Temperature (°C)` and `Dew.point.temperature (°C)`(but this is not surprising since it is a known natural relationship).
+
+```{r}
+XY.rcorr <- rcorr(as.matrix(XY[, 1:10]))
+XY.corr.coeff <- XY.rcorr$r
+XY.corr.p <- XY.rcorr$P
+#XY.corr.coeff
+#XY.corr.p
+	
+corrplot(cor(XY[, 1:10]))
+```
+
+```{r}
+#Convert the actual dataframe into the proper type
+XY <- as.data.frame(XY)
+# Reset index
+rownames(XY) <- 1:nrow(XY)
+```
+
+## 4.1. Multiple linear regression
+
+The idea is to start from a full model with the feature engineering provided so far, and then perform subsequent steps to increase the fitting of the model.
+```{r}
+reg.init <- lm(Rented.Bike.Count~., data = XY)
+summary(reg.init)
+```
+
+This first attempt shows how most of the regressors show value significantly different from zero, even if their estimates are most lower that $1e-1$ in absolute value.
+Moreover, this model achieves a $R^2 = 0.6058$. A deeper analysis on this model is provided below.
+
+
+### 4.1.1. Diagnostic - Multiple Linear Regression
+
+Check for normal distribution of the error terms.
+```{r}
+par(mfrow = c(1, 2))
+plot(reg.init, 2)
+plot(density(reg.init$residuals), main = "")
+curve(dnorm(x, mean = mean(reg.init$residuals),
+            sd = sd(reg.init$residuals)),
+      add = T, col = 2)
+```
+
+Apart from some outliers, the comparison between a normal distribution and the density estimation of the residuals shows a fair overlapping between the two. This result is confirmed also when looking at the QQ plot.
+
+```{r}
+par(mfrow = c(2, 2))
+plot(reg.init)
+```
+
+From the plot of the residuals against the fitted values we can see the mean is very close to zero. In addition, we can also show the absence of a prominent funnel shape in the residual plot, thus guiding us toward the assumption of constant variance of the error term.
+
+**Variance Inflation Factor**
+
+From the correlation matrix shown in the previous part of the report, we could see that `Dew.point.temperature (°C)` and `Temperature (°C)` are highly correlated. This is reflected also when looking at the VIF. These two variables show the most extreme values in terms of VIF, meaning that there is a high tendency for collinearity in this set of regressors.
+From now on we will consider only `Temperature (°C)`.
+
+```{r, echo = FALSE}
+vif(reg.init)
+```
+
+**Analysis of variance**
+
+From the consideration of the ANOVA with respect to the factor variables, the procedures utilized are (1) Bartlett's test on equal variances (2) ANOVA and (3) Tukey's method.
+
+Given the result of the first ($p_{value} < 2.2*10^{-16}$), we know that variances are different for the different samples (it corresponds to rejecting the null hypothesis $H_{0}$), which would break one of the assumptions of the Fisher's test.
+We can still perform ANOVA, but the results may be misleading. Through the ANOVA (Fisher's test), however we obtain a p-value that is again much lower than 0.05 - thus we reject the null hypothesis of equal means between different levels of the factor `Seasons`.
+
+```{r}
+bartlett.test(XY$Rented.Bike.Count ~ XY$Seasons)
+aov.seasons1 <- aov(XY$Rented.Bike.Count ~ XY$Seasons)
+summary(aov.seasons1)
+```
+
+Since this may not be enough, we perform a Tukey's test, which provides us with the statistical significance of each pairwise comparison between all levels of `Seasons`. Here we see that all p-values are lower than 0.05, thus making us reject the null hypothesis that all means being compared are from the same population.
+
+Finally, in order to have a graphical representation of the impact of the difference levels of this factor variable on the target variables, we considered a conditioning plot from which we can see the differences in means between groups.
+The graphs should be read from bottom left to right along each row (the bottom left one is related to the number of bikes rented by the temperature in Spring).
+The last plot of the result of the Tukey's test shows that actually the only pairwise difference whose value is close to zero is the one between *Autumn* and *Summer*. However, all the p-values are lower than 0.05, thus corroborating the fact that the pairwise differences in means are significantly different from zero.
+```{r}
+# Conditioning plot
+coplot(XY$Rented.Bike.Count ~ XY$Temperature.C. | XY$Seasons)
+tukey.seasons1 <- TukeyHSD(aov.seasons1)
+tukey.seasons1
+
+plot(tukey.seasons1, las = 1, cex.axis = .5)
+```
+
+From the diagnosis of this first model, we will adopt some changes in the set of data at hand, in particular:
+
+* Removal of 3 outliers identified through the first R plot of the subparagraph 4.1.1
+* Removal of `Dew.point.temperature (°C)`
+```{r}
+# (1) remove outliers
+XY <- XY[-c(3950, 4987, 6454), ]
+# (2) Remove Dew Point Temperature
+XY <- subset(XY, select = -c(Dew.point.temperature.C.))
+XY <- as.data.frame(XY)
+dim(XY)
+```
+
+
+## 4.2. Multiple linear regression (2nd attempt)
+
+This second attempt comes from the changes applied after the decisions described above.
+
+```{r}
+reg.out2 <- lm(Rented.Bike.Count~., data = XY)
+summary(reg.out2)
+```
+
+```{r}
+par(mfrow = c(2, 2))
+plot(reg.out2)
+```
+
+**Variance Inflation Factor**
+
+We now check whether most of the collinearity problems have been solved after removing `Dew.point.temperature (°C)`. Through the VIF we can see how this is true.
+```{r, echo = FALSE}
+vif(reg.out2)
+```
+
+From this second model, we don't see that much of an improvement in terms of the variance explained. However, this model shows that all the coefficients are still statistically different from zero.
+This still holds when looking at the ANOVA table, with a particular attention on the categorical regressors.
+```{r, echo = FALSE}
+anova(reg.out2)
+```
+
+Next, recalling the initial graphical analysis, we perform a further reconfiguration of the set of regressors, thus modeling the input space in a different way.
+This of course will increase the bias of the model, as it comes from the following major assumption:
+
+> Regardless of how much it rains (or snows), the focus is on the event of raining (or snowing)
+
+```{r}
+snow.comparison <- data.frame( quantile(exp(XY[XY$Snowfall.cm. == 0,]$Rented.Bike.Count),
+                                        seq = c(0, .25, .5, .75, 1)),
+                               quantile(exp(XY[XY$Snowfall.cm. != 0,]$Rented.Bike.Count),
+                                        seq = c(0, .25, .5, .75, 1)) )
+names(snow.comparison) <- c("No Snow", "Snow")
+snow.comparison
+
+
+rain.comparison <- data.frame( quantile(exp(XY[XY$Rainfall.mm. == 0,]$Rented.Bike.Count),
+                                        seq = c(0, .25, .5, .75, 1)),
+                               quantile(exp(XY[XY$Rainfall.mm. != 0,]$Rented.Bike.Count),
+                                        seq = c(0, .25, .5, .75, 1)) )
+names(rain.comparison) <- c("No Rain", "Rain")
+rain.comparison
+```
+
+
+Thus a copy of the `data.frame` used so far has been created, and a conversion into binary factors of the variables `Snowfall (cm)` and `Rainfall (mm)` is applied.
+```{r}
+XY2 <- copy(XY)
+
+XY2$Rainfall.mm. <- as.factor(ifelse(XY2$Rainfall.mm. == 0, 0, 1))
+XY2$Snowfall.cm. <- as.factor(ifelse(XY2$Snowfall.cm. == 0, 0, 1))
+
+XY2 <- as.data.frame(XY2)
+
+reg.rain.snow.flag <- lm(Rented.Bike.Count~., data = XY2)
+summary(reg.rain.snow.flag)
+```
+The result shows definitely an improvement of the overall explained variance of the model. As a matter of fact, it attests to have the biggest adjusted $R^{2}$ so far, i.e. $0.6531$.
+
+Diagnosis of the model is carried out below.
+As shown, there is still absence of collinearity at this point, and the assumptions of the linear regression model keep holding (homoscedasticity, normal distribution of the error term, independence of errors).
+```{r}
+par(mfrow = c(2, 2))
+plot(reg.rain.snow.flag)
+```
+
+```{r}
+vif(reg.rain.snow.flag)
+```
+
+Finally, we have performed the test on homogeneity of variances for the two new factor variables created.
+For both the variables `Snowfall (cm)` and `Rainfall (mm)`, we observe the same behavior of the Bartlett's test on homogeneity of variance ($p_{value} < 0.05$ and consequent rejection of the null hypothesis). We directly rely on a Tukey's test (which in this case provides only one line of output as the number of levels is 2 for both variables), and the p-value is lower than 0.05 in both cases. We thus reject the null hypothesis of the test.
+```{r}
+bartlett.test(XY2$Rented.Bike.Count ~ XY2$Snowfall.cm.)
+TukeyHSD(aov(XY2$Rented.Bike.Count ~ XY2$Snowfall.cm.))
+
+bartlett.test(XY2$Rented.Bike.Count ~ XY2$Rainfall.mm.)
+TukeyHSD(aov(XY2$Rented.Bike.Count ~ XY2$Rainfall.mm.))
+```
+
+# 5. FURTHER STUDIES
+
+The following part is aimed at deepen the study under two directories:
+
+* Variable selection
+* Regularization
+
+```{r}
+# Define a function that plots the results of a variable selection procedure
+selection.result <- function(data) {
+  
+  par(mfrow = c(2, 2))
+  
+  # (1) Residual sum of squares
+  plot(data$rss, xlab = "Number of Variables",
+     ylab = "RSS", type = "l")
+  
+  # (2) Adjusted-R^2 with its largest value
+  plot(data$adjr2, xlab = "Number of Variables",
+       ylab = "Adjusted Rsq", type = "l")
+  points(which.max(data$adjr2), data$adjr2[which.max(data$adjr2)],
+         col = "#1ED760", cex = 3, pch = 20)
+  
+  # (3) Mallow's Cp with its smallest value
+  plot(data$cp, xlab = "Number of Variables",
+       ylab = "Cp", type = "l")
+  points(which.min(data$cp), data$cp[which.min(data$cp)],
+         col = "#1ED760", cex = 3, pch = 20)
+  
+  # (4) BIC with its smallest value
+  plot(data$bic, xlab = "Number of Variables",
+       ylab = "BIC", type = "l")
+  points(which.min(data$bic), data$bic[which.min(data$bic)],
+         col = "#1ED760", cex = 3, pch = 20)
+  
+  out <- data$adjr2[which.max(data$adjr2)]
+  out <- round(out, 4)
+  
+  return(out)
+}
+```
+
+## 5.1. Variable selection - Best Subset
+```{r}
+reg.best.subset <- regsubsets(Rented.Bike.Count~., data = XY2,
+                              nvmax = dim(XY)[2] - 1)
+best.subset.summary <- summary(reg.best.subset)
+
+noquote( c("Adj. R-squared: ", selection.result(best.subset.summary)) )
+
+par(mfrow = c(1, 1))
+plot(reg.best.subset, scale = "adjr2")
+```
+
+
+
+## 5.2. Variable selection - Forward Selection
+```{r}
+reg.fwd.select <- regsubsets(Rented.Bike.Count~., data = XY2,
+                             nvmax = dim(XY)[2] - 1, method = "forward")
+fwd.select.summary <- summary(reg.fwd.select)
+
+noquote( c("Adj. R-squared: ", selection.result(fwd.select.summary)) )
+
+par(mfrow = c(1, 1))
+plot(reg.fwd.select, scale = "adjr2")
+```
+
+## 5.3. Variable selection - Backward Selection
+```{r}
+reg.bkw.select <- regsubsets(Rented.Bike.Count~., data = XY2,
+                             nvmax = dim(XY)[2] - 1, method = "backward")
+bkw.select.summary <- summary(reg.bkw.select)
+
+noquote( c("Adj. R-squared: ", selection.result(bkw.select.summary)) )
+
+par(mfrow = c(1, 1))
+plot(reg.bkw.select, scale = "adjr2")
+```
+
+So far, we have considered three different approaches for feature selection that either exploit an exhaustive search or greedy step-wise improvements.
+As a matter of fact, **best subset selection** tries all the combination of variables per each model size (number of regressors), selects the best combination per size and yields the best size (with the corresponding best subset of predictors).
+The other two, namely **backward stepwise** and **forward stepwise**, perform greedy steps (under different metrics, e.g. Bayesian Information Criterion, Adjusted $R^{2}$, etc.) while removing (the former) or adding (the latter) one regressor at a time.
+
+For the scope of the analysis we can see that the three methods yield the same result under each of the metrics considered (BIC, $Adj. R^{2}$, Mallow's C). This does not stop to the size of the subset of regressors, but also on the choice of the regressors themselves.
+
+The equivalent behavior between forward and backward step-wise selection can be expected, but the same pattern shown by the best subset is an additional corroboration of the experimentation of variable selection.
+Therefore, for this part of the report, we will set as a second baseline the model obtained with Best Subset Selection, under the $Adj. R^{2}$ metric, which is:
+
+```{r}
+best.subset.summary$which[which.max(best.subset.summary$adjr2),]
+```
+
+
+The above subset of regressors is further tried out using 10-fold cross validation. This shows again the the best subset yields a model with 8 predictors.
+
+```{r}
+set.seed(42)
+folds <- sample(1:10, nrow(XY2), replace = TRUE)
+
+cv.errors <- matrix(NA, 10, dim(XY2)[2] - 1)
+colnames(cv.errors) <- 1:(dim(XY2)[2] - 1)
+
+
+for(j in 1:10){
+  best.fit <- regsubsets(Rented.Bike.Count~.,
+                         data = XY2[folds!=j,], nvmax = (dim(XY2)[2] - 1))
+  test.mat <- model.matrix(Rented.Bike.Count~., data = XY2[folds == j,])
+  for(i in 1: (dim(XY2)[2] - 1)){
+    coefi <- coef(best.fit, id=i)
+    pred <- test.mat[, names(coefi)]%*%coefi
+    cv.errors[j,i] <- mean( (XY2$Rented.Bike.Count[folds == j] - pred)^2)
+  }
+}
+
+mean.cv.errors <- apply(cv.errors, 2, mean) 
+
+plot(mean.cv.errors, type = "b",
+     main = "Avg 10-fold CV errors",
+     xlab = "Number of regressors")
+
+points(which.min(mean.cv.errors),
+       mean.cv.errors[which.min(mean.cv.errors)],
+       col = "#1ED760", cex = 3, pch = 20)
+```
+
+We thus explicitly define the resulting Best Subset, which has the following variables removed:
+
+* `Visibility (10m)`
+* `Windspeed (m/s)`
+* `Snowfall (1/0 flag)`
+
+```{r}
+XYBSS <- copy(XY2)
+XYBSS <- as.data.frame(subset(XYBSS, select = -c(Visibility.10m,
+                                                 Wind.speed.m.s.,
+                                                 Snowfall.cm.)))
+
+reg.best.subset.out <- lm(Rented.Bike.Count~., data = XYBSS)
+summary(reg.best.subset.out)
+# Fit the best model and do the anova test (look at article for reference)
+anova(reg.best.subset.out, reg.rain.snow.flag)
+```
+
+Since the two models are nested we can perform a *chisq-test* on the reduction of the residuals. From the latter, in which the null hypothesis ($H_{0}$) can be formulated as:
+
+> The reduction in the residual sum of squares is statistically significant
+
+we can notice how $p = 0.9693$, thus much larger than $0.05$ associated to a 95% confidence. This means we don't reject the null hypothesis: in other words, by adding the three variables (`Visibility.10m.`, `Wind.speed.m.s.`, `Snowfall..cm.`) we have not obtained a statistically significant improvement in the variance explained by the new model. As a matter of fact, the $Adj. R^{2}$ is unchanged from the previous step.
+
+We have performed an additional check for the `Seasons` variable, as the level *Summer* still shows a very high p-value (on the test whose $H_{0}:\hat\beta_{i} = 0$).
+The result of the following chunks should not be too far from the one shown in paragraph 4.1 (since the only difference is that 3 statistical units have been removed - i.e. the outliers).
+In fact, we observe the Bartlett's test to have almost the same test statistics and a p-value far below the 0.05 threshold, thus indicating that we should reject the $H_{0}$ of homogeneity of variances.
+The reasoning provided in the aforementioned paragraph holds for the ANOVA as well. Finally, we propose the additional Tukey's test to show that the all the p-values of the pairwise differences in means lead to the rejection of the null hypothesis of equal mean between groups.
+
+```{r}
+bartlett.test(XYBSS$Rented.Bike.Count ~ XYBSS$Seasons)
+aov.seasons2 <- aov(XYBSS$Rented.Bike.Count ~ XYBSS$Seasons)
+summary(aov.seasons2)
+# Conditioning plot
+coplot(XYBSS$Rented.Bike.Count ~ XYBSS$Temperature.C. | XYBSS$Seasons)
+tukey.seasons2 <- TukeyHSD(aov.seasons2)
+tukey.seasons2
+
+plot(tukey.seasons2, las = 1, cex.axis = .5)
+```
+
+Finally, we have checked on variance inflation factors and further diagnostic.
+```{r, echo = FALSE}
+vif(reg.best.subset.out)
+```
+
+```{r, echo = FALSE}
+par(mfrow = c(2, 2))
+plot(reg.best.subset.out)
+```
+
+
+## 5.4. Train-test split
+In the following part of the report we will analyze two shrinkage techniques:
+
+* **LASSO** (also known as L1 penalty)
+* **Ridge** (also known as L2 penalty or Weight Decay)
+
+To provide a more reliable assessment of the performance of these regularization strategies, the implementation will again stick to the cross-validation approach.
+
+```{r}
+# design matrix
+X.matrix <- model.matrix(Rented.Bike.Count~., XY2)
+
+# remove the first column relative to the intercept
+X.matrix <- X.matrix[,-1]
+
+# vector of responses
+y.vector <- XY2$Rented.Bike.Count
+
+# SPLIT -----
+train <- sample(1:nrow(XY2), nrow(XY2)*0.75)
+test <- (-train)
+
+X.train <- X.matrix[train, ]
+X.test <- X.matrix[test, ]
+
+y.train <- y.vector[train]
+y.test <- y.vector[test]
+
+print(dim(X.train))
+print(dim(X.test))
+```
+
+
+```{r}
+adjr2.function <- function(X.ref, v.pred, v.true){
+  
+  # Parameters
+  # ----------
+  # X.ref  : data matrix of the regressors
+  # v.pred : y.hat (array of values predicted by the model)
+  # v.true : ground truth array of values
+  
+  rss <- sum((v.true - v.pred)^2)
+  tss <- sum((v.true - mean(v.true))^2)
+
+  r2 <- (tss - rss)/tss
+  
+  adjr2 <- 1 - (1 - r2)*( (length(v.true) - 1)/(length(v.true) - dim(X.ref)[2] - 1) )
+    
+  output <- t(matrix(c(round(adjr2, 4),
+                       round(r2, 4)) ) )
+  output <- as.data.frame(output)
+  colnames(output) <- c("Adj.R2", "R2")
+  rownames(output) <- c("VALUE")
+  return( output )
+  }
+```
+
+## 5.5. Regularization tecnhiques: LASSO
+
+```{r}
+# LASSO with CV
+lambda.lasso <- seq(0, 10, length = 200)
+
+
+set.seed(42)
+# alpha = 1: LASSO
+lasso.cv <- cv.glmnet(X.train, y.train, alpha = 1,
+                      nfold = 10, lambda = lambda.lasso)
+
+plot(lasso.cv$lambda, lasso.cv$cvm, type = "l",
+     main = "Training MSE of 10-fold CV Lasso",
+     xlab = expression(lambda), ylab = "Mean Cross-validated error",
+     ylim = c(0, max(lasso.cv$cvm)*1.1))
+
+# To ensure a minimum extent of regularization, best lambda
+# is chosen through the max function
+best.lambda.lasso <- max(0.1, rev(lasso.cv$lambda)[2])
+noquote(c("Lambda:", best.lambda.lasso))
+```
+
+```{r}
+lasso.pred.test <- predict(glmnet(X.train, y.train, alpha = 1,
+                                  lambda = best.lambda.lasso),
+                      s = best.lambda.lasso,
+                      newx = X.test)
+
+mean((lasso.pred.test - y.test)^2)
+
+# Fit on the whole set of data
+final.lasso <- glmnet(X.matrix, y.vector, alpha = 1,
+                      lambda = best.lambda.lasso)
+final.lasso.pred <- predict(final.lasso, newx = X.matrix,
+                            s = best.lambda.lasso)
+
+mean((final.lasso.pred - y.vector)^2)
+
+# Compute the R2 and the Adjusted R2
+noquote(c("R-squared: ",
+          adjr2.function(X.matrix, final.lasso.pred, y.vector)$R2,
+          "Adj. R-squared: ",
+          adjr2.function(X.matrix, final.lasso.pred , y.vector)$Adj.R2) )
+```
+
+## 5.6. Regularization tecnhiques: Ridge
+
+```{r}
+# Ridge with CV
+lambda.ridge <- seq(0, 10, length = 200)
+
+
+set.seed(42)
+# alpha = 0: Ridge
+ridge.cv <- cv.glmnet(X.train, y.train, alpha = 0,
+                      nfold = 10, lambda = lambda.ridge)
+
+plot(ridge.cv$lambda, ridge.cv$cvm, type = "l",
+     main = "Training MSE of 10-fold CV Ridge",
+     xlab = expression(lambda), ylab = "Mean Cross-validated error",
+     ylim = c(0, max(ridge.cv$cvm)*1.1))
+
+# To ensure a minimum extent of regularization, best lambda
+# is chosen through the max function
+best.lambda.ridge <- max(0.1, ridge.cv$lambda.1se)
+noquote(c("Lambda:", best.lambda.ridge))
+```
+
+We can see how as the intensity of the Ridge shrinkage method (i.e. $\lambda$) increases, the standard error increases as well. This behavior is expected as we are adding more bias into the model, which in turn is not overfitting at all.
+However, it is clear to see the effect of the regularization method from the effect that it has on the test error by looking at the difference between the two $MSE$ shown below.
+
+```{r}
+ridge.pred.test <- predict(glmnet(X.train, y.train, alpha = 0,
+                                  lambda = best.lambda.ridge),
+                      s = best.lambda.ridge,
+                      newx = X.test)
+
+mean((ridge.pred.test - y.test)^2)
+
+# Fit on the whole set of data
+final.ridge <- glmnet(X.matrix, y.vector, alpha = 0,
+                      lambda = ridge.cv$lambda.1se)
+final.ridge.pred <- predict(final.ridge, newx = X.matrix,
+                            s = best.lambda.ridge)
+
+mean((final.ridge.pred - y.vector)^2)
+
+# Compute the R2 and the Adjusted R2
+noquote(c("R-squared: ",
+          adjr2.function(X.matrix, final.ridge.pred, y.vector)$R2,
+          "Adj. R-squared: ",
+          adjr2.function(X.matrix, final.ridge.pred, y.vector)$Adj.R2) )
+```
+
+Since both LASSO and RIDGE regressions introduce bias in the coefficients by design, statistical tests becomes inappropriate. Thus we will rely on the $Adj. R^{2}$ to assess whether to keep going with the current model or not.
+
+Moreover, we can notice how the RIDGE penalty outperforms LASSO under the above mentioned metric. This behavior is expected as the "aggressiveness" of the LASSO regression is higher (the penalty scales with the sign of the coefficients rather than linearly with the euclidean norm, as it happens for the L2).
+
+This difference can be shown when considering how the number of non zero components varies with respect to the intensity of the regularization (the comparison is eased since for both, as ${\lambda}$ increases, the regularization "intensity" increases). 
+
+As a matter of facts, we see how the components never get to zero for the considered grid of parameters with a L2 norm, while for the L1 penalty, all parameters get to zero very fast.
+
+```{r}
+plot(lasso.cv$lambda, lasso.cv$nzero, type = "b", col = "#1ED760",
+     xlab = expression(lambda), ylab = "# of non-zero components",
+     main = "Number of non-zero components against regularization intensity")
+lines(ridge.cv$lambda, ridge.cv$nzero, type = "b", col = "blue")
+legend(8, 7, c("RIDGE", "LASSO"), col = c("blue", "#1ED760"),
+       lty = 1, cex = 0.8)
+```
+
+# 6. MODEL SELECTION
+
+In the Section 5 of this report we've seen how the dimensionality of the problem can be reduced to 8 regressors without a relevant loss in terms of variance explained by the model.
+
+In addition, when it comes to shrinkage techniques for this application, RIDGE penalty outperforms LASSO but for both of them there can be found a small decrease in the variance explained.
+
+Before choosing the final model, we want to try RIDGE shrinkage on the model that came out with the Best Subset Selection.
+
+```{r}
+# design matrix
+XF.matrix <- model.matrix(Rented.Bike.Count~., XYBSS)
+XF.matrix <- XF.matrix[,-1]
+yF.vector <- XYBSS$Rented.Bike.Count
+
+# SPLIT -----
+train2 <- sample(1:nrow(XYBSS), nrow(XYBSS)*0.75)
+test2 <- (-train2)
+
+X.train2 <- XF.matrix[train2, ]
+X.test2 <- XF.matrix[test2, ]
+
+y.train2 <- y.vector[train2]
+y.test2 <- y.vector[test2]
+
+set.seed(42)
+# alpha = 0: Ridge
+ridge.cv2 <- cv.glmnet(X.train2, y.train2, alpha = 0,
+                      nfold = 10, lambda = lambda.ridge)
+
+# To ensure a minimum extent of regularization, best lambda
+# is chosen through the max function
+best.lambda.ridge2 <- max(0.1, ridge.cv2$lambda.1se)
+noquote(c("Lambda:", best.lambda.ridge2))
+
+# Fit on the whole set of data
+final.ridge.bbs <- glmnet(XF.matrix, yF.vector, alpha = 0,
+                          lambda = ridge.cv2$lambda.1se)
+final.ridge.bbs.pred <- predict(final.ridge.bbs, newx = XF.matrix,
+                            s = best.lambda.ridge2)
+
+# Compute the R2 and the Adjusted R2
+noquote(c("R-squared: ",
+          adjr2.function(XF.matrix, final.ridge.bbs.pred, yF.vector)$R2,
+          "Adj. R-squared: ",
+          adjr2.function(XF.matrix, final.ridge.bbs.pred, yF.vector)$Adj.R2) )
+```
+
+Comparison of BSS alone against BSS+RIDGE on the whole set of data on $MSE$:
+```{r}
+noquote(c("Best Subset MSE:",
+          round(mean((predict(reg.best.subset.out,
+                              newx = XF.matrix) - yF.vector)^2), 4)))
+noquote(c("BSS + RIDGE MSE:",
+          round(mean((final.ridge.bbs.pred - yF.vector)^2), 4)))
+```
+
+After this final control on the performance of the models tried so far we can express a selection more safely: the choice falls on the Best Subset Selection.
+
+This means that for the problem at hand, with the initial set of available regressors, the most performing method is the latter, given that the target variable is expressed as its `log()`.
+
+Below the comparison with the true values.
+```{r, echo = FALSE}
+data.output <- copy(yF.vector)
+data.output <- as.data.frame(data.output)
+data.output$Predicted <- predict(reg.best.subset.out, newx = XF.matrix)
+
+names(data.output) <- c("True.Values", "Predicted")
+data.output$Temperature <- XYBSS$Temperature..C.
+
+
+#data.output <- data.output[order(data.output$True.Values),]
+data.output <- as.data.frame(data.output)
+
+plot(data.output$True.Values, type = "l", col = "#1874CD90",
+     xlab = "Index", ylab = "Log of Rented.Bike.count",
+     main = "Comparison of true and predicted (log) values")
+lines(data.output$Predicted, col = "#FF610390", lwd = 2)
+legend(6700, 2, c("Predicted", "True.Values"),
+       col = c("#FF6103", "#1874CD"),
+       lty = 1, cex = 0.8)
+```
+
+```{r, echo = FALSE}
+noquote(c("Adj. R-squared: ",
+          round(summary(reg.best.subset.out)$adj.r.squared, 4)))
+```
+
+
+# 7. CONCLUSION
+
+The analysis started from the problem of estimating the number of rented bikes for the city of Seoul given data on atmospheric conditions for a time interval of 12 months that goes from the end of 2017 to the end of 2018.
+
+The starting set of variable has required some feature engineering to improve the quality of the estimate and to comply with the linear regression hypothesis. In particular, it has been demonstrated how the consideration of the logarithm of the target variable, the conversion of some variables into binary factors and the removal of a small number of outliers increased the explained variance of the model.
+
+Next, through different techniques it has been shown how the exclusion of some of the variables that were initially available was not detrimental in terms of explained variance. The impact of this discovery is mainly related to the potential saved costs that a public administration (or, more broadly, entity) may benefit from, as the cost of acquisition and maintenance of sensors to acquire data of those variables might be eliminated. For instance, this may be not be true for the Dew Point Temperature, since this quantity can be calculated as a function of Temperature and Humidity. But, if some equipment was thought to be bought on purpose for the measurement of the Visibility, this may not be required due to the findings of this study.
+
+In addition, another aspect to take into account is the effect of the shrinkage experienced for the data at hand. Throughout the study it has been shown how regularization (LASSO and Ridge) have provided no beneficial effects in terms of explained variance. This may be due to the fact that all the models suffer from underfitting, which is mainly related to the sample size or the lack of enough independent variables to estimate the target.
+
+Regularization entails any strategy meant to reduce the generalization error, but it can sometimes worsen the training error and add additional bias to a model. When it is applied to an underfitting model (i.e. a model whose bias is high) the predictive power is inevitably decreased.
+
+This consideration, however, leads to another aspect that entails the further development of the work. As a matter of facts, the variables at hand pertain for the vast majority to the atmospheric domain, and only a small space is reserved to the actual life of the city: the presence of events (e.g. festivals, parades, etc.), proxy variables for the traffic in the area considered, number of active means of public transportation, and so on were not available in the original dataset.
+
+These aspects may not be neglected: bike sharing is the most sustainable means of transportation for the big public and it perfectly serves the purpose of covering the famous "last mile" of a journey, that is the last part of the travel not covered by public transportation but it is not far from its coverage. Furthermore, the impact of a good prediction of the amount of bikes rented may lead to a decrease, even if slight, of the overall CO2 emissions for which public entities account for, since a public administration may realize not only how many bikes to keep available, but how to better cover areas of the city that may show the willingness to open up to this mean of transportation.
